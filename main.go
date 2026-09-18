@@ -2,8 +2,9 @@ package main
 
 import (
 	"crypto/rand"
-	"database/sql"
+	"errors"
 	"fmt"
+	"gopulse/internal/notification"
 	"gopulse/internal/user"
 	"math/big"
 	mrand "math/rand"
@@ -21,24 +22,20 @@ import (
 )
 
 type Handler struct {
-	DB     *sql.DB
-	Config config.Config
+	UserRepository user.UserRepository
+	EmailService   *notification.EmailService
+	Config         config.Config
 }
-
-// type User struct {
-// 	Name    string `json:"name" binding:"required,min=2"`
-// 	Surname string `json:"surname" binding:"required,min=2"`
-// }
 
 type CredentialsResponse struct {
-	Message        string    `json:"message"`
-	User           user.User `json:"user"`
-	Email          string    `json:"email"`
-	Password       string    `json:"password"`
-	HashedPassword string    `json:"hashed_password"`
-	Verified       bool      `json:"verified"`
+	Message        string `json:"message"`
+	Name           string `json:"name"`
+	Surname        string `json:"surname"`
+	Email          string `json:"email"`
+	Password       string `json:"password"`
+	HashedPassword string `json:"hashed_password"`
+	Verified       bool   `json:"verified"`
 }
-
 type LoginCredentials struct {
 	Email    string `json:"email"`
 	Password string `json:"password"`
@@ -53,10 +50,13 @@ func main() {
 
 	db := database.ConnectionPostgres(cfg)
 	defer db.Close()
+	userRepository := user.NewPostgresUserRepository(db)
 
+	EmailService := notification.NewEmailService()
 	handler := &Handler{
-		DB:     db,
-		Config: cfg,
+		UserRepository: userRepository,
+		EmailService:   EmailService,
+		Config:         cfg,
 	}
 
 	r := gin.Default()
@@ -94,12 +94,7 @@ func (h *Handler) Login(c *gin.Context) {
 		return
 	}
 
-	var storedHash string
-
-	err := h.DB.QueryRow(
-		`SELECT hashed_password FROM kullanicilar WHERE email = $1`,
-		loginCredentials.Email,
-	).Scan(&storedHash)
+	storedHash, err := h.UserRepository.FindHashedPasswordByEmail(loginCredentials.Email)
 
 	if err != nil {
 		c.JSON(400, gin.H{"error": "User not found"})
@@ -113,10 +108,7 @@ func (h *Handler) Login(c *gin.Context) {
 
 	var name, surname string
 
-	err = h.DB.QueryRow(
-		`SELECT name, surname FROM kullanicilar WHERE email = $1`,
-		loginCredentials.Email,
-	).Scan(&name, &surname)
+	name, surname, err = h.UserRepository.FindNameSurnameByEmail(loginCredentials.Email)
 
 	if err != nil {
 		c.JSON(500, gin.H{"error": "Failed to retrieve user information"})
@@ -232,16 +224,15 @@ func (h *Handler) Profile(c *gin.Context) {
 }
 
 func (h *Handler) UsersHandler(c *gin.Context) {
-	user := user.User{}
-
-	if err := c.ShouldBindJSON(&user); err != nil {
+	var req user.CreateUserRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(400, gin.H{"error": err.Error()})
 		return
 	}
 
-	email, password, err := h.generateCredentials(user.Name, user.Surname)
+	password, err := GenerateRandomPassword()
 	if err != nil {
-		c.JSON(500, gin.H{"error": err.Error()})
+		c.JSON(500, gin.H{"error": "Failed to generate password"})
 		return
 	}
 
@@ -253,30 +244,57 @@ func (h *Handler) UsersHandler(c *gin.Context) {
 
 	verified := VerifyPassword(password, hashedPassword)
 
-	res, err := h.DB.Exec(
-		`INSERT INTO kullanicilar
-		(name, surname, email, password, hashed_password, verified)
-		VALUES ($1, $2, $3, $4, $5, $6)`,
-		user.Name,
-		user.Surname,
-		email,
-		password,
-		hashedPassword,
-		verified,
-	)
+	const maxRetries = 5
+	var email string
+	var lastErr error
 
-	if err != nil {
+	for attempt := 0; attempt < maxRetries; attempt++ {
+		candidateEmail := generateCandidateEmail(req.Name, req.Surname)
+
+		newUser := user.User{
+			Name:           req.Name,
+			Surname:        req.Surname,
+			Email:          candidateEmail,
+			HashedPassword: hashedPassword,
+			Verified:       verified,
+		}
+
+		err := h.UserRepository.Create(newUser)
+		if err == nil {
+			email = candidateEmail
+			lastErr = nil
+			break
+		}
+
+		if errors.Is(err, user.ErrEmailAlreadyExists) {
+			lastErr = err
+			continue
+		}
+
+		fmt.Printf("Create user error: %v\n", err)
+
 		c.JSON(500, gin.H{
-			"error": "Failed to insert user into database",
+			"error":   "Failed to insert user into database",
+			"details": err.Error(),
 		})
 		return
 	}
 
-	fmt.Printf("Inserted user into database: %v\n", res)
+	if email == "" {
+		fmt.Println("could not generate unique email after retries:", lastErr)
+		c.JSON(500, gin.H{"error": "Could not create user, please try again"})
+		return
+	}
+
+	if err := h.EmailService.SendCredentials(email, password); err != nil {
+		c.JSON(500, gin.H{"error": "User created but failed to send email"})
+		return
+	}
 
 	c.JSON(200, CredentialsResponse{
 		Message:        "User created successfully",
-		User:           user,
+		Name:           req.Name,
+		Surname:        req.Surname,
 		Email:          email,
 		Password:       password,
 		HashedPassword: hashedPassword,
@@ -284,62 +302,9 @@ func (h *Handler) UsersHandler(c *gin.Context) {
 	})
 }
 
-func (h *Handler) generateCredentials(name, surname string) (string, string, error) {
-	var email string
-
-	for {
-		number := mrand.Intn(90) + 10
-
-		candidateEmail := fmt.Sprintf(
-			"%s.%s%d@example.com",
-			name,
-			surname,
-			number,
-		)
-
-		var exists bool
-
-		err := h.DB.QueryRow(
-			`SELECT EXISTS(
-				SELECT 1 FROM kullanicilar WHERE email = $1
-			)`,
-			candidateEmail,
-		).Scan(&exists)
-
-		if err != nil {
-			return "", "", fmt.Errorf(
-				"error checking email: %w",
-				err,
-			)
-		}
-
-		if !exists {
-			email = candidateEmail
-			break
-		}
-	}
-
-	const chars = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789!@#$%^&*()-_=+"
-
-	password := make([]byte, 16)
-
-	for i := range password {
-		n, err := rand.Int(
-			rand.Reader,
-			big.NewInt(int64(len(chars))),
-		)
-
-		if err != nil {
-			return "", "", fmt.Errorf(
-				"error generating random number: %w",
-				err,
-			)
-		}
-
-		password[i] = chars[n.Int64()]
-	}
-
-	return email, string(password), nil
+func generateCandidateEmail(name, surname string) string {
+	number := mrand.Intn(90) + 10
+	return fmt.Sprintf("%s.%s%d@example.com", name, surname, number)
 }
 
 func HashPassword(password string) (string, error) {
@@ -358,4 +323,17 @@ func VerifyPassword(password, hash string) bool {
 	)
 
 	return err == nil
+}
+
+func GenerateRandomPassword() (string, error) {
+	const chars = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789!@#$%^&*()-_=+"
+	password := make([]byte, 16)
+	for i := range password {
+		n, err := rand.Int(rand.Reader, big.NewInt(int64(len(chars))))
+		if err != nil {
+			return "", fmt.Errorf("error generating random number: %w", err)
+		}
+		password[i] = chars[n.Int64()]
+	}
+	return string(password), nil
 }

@@ -23,14 +23,13 @@ func ConnectionPostgres(cfg config.Config) *sql.DB {
 	}
 
 	_, err = db.Exec(`CREATE TABLE IF NOT EXISTS kullanicilar (
-		id SERIAL PRIMARY KEY,
-		name VARCHAR(255) NOT NULL,
-		surname VARCHAR(255) NOT NULL,
-		email VARCHAR(255) NOT NULL UNIQUE,
-		password VARCHAR(255) NOT NULL,
-		hashed_password VARCHAR(255) NOT NULL,
-		verified BOOLEAN NOT NULL DEFAULT false
-	)`)
+    id SERIAL PRIMARY KEY,
+    name VARCHAR(255) NOT NULL,
+    surname VARCHAR(255) NOT NULL,
+    email VARCHAR(255) NOT NULL UNIQUE,
+    hashed_password VARCHAR(255) NOT NULL,
+    verified BOOLEAN NOT NULL DEFAULT false
+)`)
 	if err != nil {
 		log.Fatal("Table creation error:", err)
 	}
