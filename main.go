@@ -4,8 +4,10 @@ import (
 	"crypto/rand"
 	"errors"
 	"fmt"
+	"gopulse/internal/mq"
 	"gopulse/internal/notification"
 	"gopulse/internal/user"
+	"log"
 	"math/big"
 	mrand "math/rand"
 	"strings"
@@ -23,7 +25,7 @@ import (
 
 type Handler struct {
 	UserRepository user.UserRepository
-	EmailService   *notification.EmailService
+	EmailProducer  *notification.EmailProducer
 	Config         config.Config
 }
 
@@ -50,12 +52,32 @@ func main() {
 
 	db := database.ConnectionPostgres(cfg)
 	defer db.Close()
+
+	mqConn, err := mq.Connect(cfg.RabbitMQURL)
+	if err != nil {
+		fmt.Println("Error connecting to RabbitMQ:", err)
+		return
+	}
+	defer mq.Close(mqConn)
+
+	setupCh, err := mqConn.Channel()
+	if err != nil {
+		log.Fatal("Failed to open setup channel:", err)
+	}
+
+	if _, err := mq.DeclareQueue(setupCh, notification.EmailQueueName); err != nil {
+		log.Fatal("Failed to declare email queue:", err)
+	}
+	setupCh.Close()
+
+	emailProducer := notification.NewEmailProducer(mqConn)
+
 	userRepository := user.NewPostgresUserRepository(db)
 
-	EmailService := notification.NewEmailService()
+	// EmailService := notification.NewEmailService()
 	handler := &Handler{
 		UserRepository: userRepository,
-		EmailService:   EmailService,
+		EmailProducer:  emailProducer,
 		Config:         cfg,
 	}
 
@@ -286,11 +308,14 @@ func (h *Handler) UsersHandler(c *gin.Context) {
 		return
 	}
 
-	if err := h.EmailService.SendCredentials(email, password); err != nil {
-		c.JSON(500, gin.H{"error": "User created but failed to send email"})
+	// if err := h.EmailService.SendCredentials(email, password); err != nil {
+	// 	c.JSON(500, gin.H{"error": "User created but failed to send email"})
+	// 	return
+	// }
+	if err := h.EmailProducer.Publish(email, password); err != nil {
+		c.JSON(500, gin.H{"error": "User created but failed to queue notification", "created name": req.Name, "created user email": email})
 		return
 	}
-
 	c.JSON(200, CredentialsResponse{
 		Message:        "User created successfully",
 		Name:           req.Name,
