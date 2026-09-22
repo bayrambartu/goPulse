@@ -74,7 +74,14 @@ func main() {
 
 	userRepository := user.NewPostgresUserRepository(db)
 
-	// EmailService := notification.NewEmailService()
+	EmailService := notification.NewEmailService()
+	EmailConsumer := notification.NewEmailConsumer(mqConn, EmailService)
+
+	go func() {
+		if err := EmailConsumer.Start(); err != nil {
+			log.Fatal("Failed to start email consumer:", err)
+		}
+	}()
 	handler := &Handler{
 		UserRepository: userRepository,
 		EmailProducer:  emailProducer,
