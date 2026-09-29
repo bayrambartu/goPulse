@@ -65,7 +65,7 @@ func main() {
 		log.Fatal("Failed to open setup channel:", err)
 	}
 
-	if _, err := mq.DeclareQueue(setupCh, notification.EmailQueueName); err != nil {
+	if _, err := mq.DeclareQueueWithDLX(setupCh, notification.EmailQueueName, notification.EmailDLXName, notification.EmailDLQName); err != nil {
 		log.Fatal("Failed to declare email queue:", err)
 	}
 	setupCh.Close()

@@ -13,6 +13,8 @@ func NewEmailService() *EmailService {
 }
 
 func (s *EmailService) SendCredentials(email, password string) error {
+	return fmt.Errorf("simulated permanent failure")
+
 	delay := time.Duration(300+rand.Intn(1200)) * time.Millisecond
 	time.Sleep(delay)
 

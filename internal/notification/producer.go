@@ -10,7 +10,11 @@ import (
 	amqp "github.com/rabbitmq/amqp091-go"
 )
 
-const EmailQueueName = "email.send_queue"
+const (
+	EmailQueueName = "email.send_credentials"
+	EmailDLXName   = "email.send_credentials.dlx"
+	EmailDLQName   = "email.send_credentials.dlq"
+)
 
 type CredentialsEmailMessage struct {
 	Email    string `json:"email"`
